@@ -202,3 +202,84 @@ with t4:
     st.write(f"Brake-side quasi-static tension at constant speed: **{quasi_static_tension_kgf(test):.2f} kgf**. This is NOT guaranteed when the torque commands accelerate the rope.")
     st.write(f"Static calibration uncertainty allowance: **±{test.static_calibration_error_kgf:.2f} kgf**.")
     st.markdown("**Limitations:** no changing drum radius, rope slack, elasticity, active speed control, backlash, thermal dynamics, braking voltage regulation or sensor bandwidth effects. Use measured parameters and additional runs to validate.")
+
+st.divider()
+with st.expander("Four-condition cross-validation · 6/2, 7/4, 8/5, 9/6",expanded=True):
+    st.caption("Edit measured values to replace the initial observations from the October 27 run dashboard. One shared hardware parameter set is used for all four cases.")
+    observed=st.data_editor(pd.DataFrame([
+        {"Test":"6/2","Pull set kgf":6.,"Brake set kgf":2.,"Measured peak speed m/s":10.44,"Measured LC sum kgf":4.0},
+        {"Test":"7/4","Pull set kgf":7.,"Brake set kgf":4.,"Measured peak speed m/s":6.57,"Measured LC sum kgf":6.0},
+        {"Test":"8/5","Pull set kgf":8.,"Brake set kgf":5.,"Measured peak speed m/s":6.33,"Measured LC sum kgf":7.2},
+        {"Test":"9/6","Pull set kgf":9.,"Brake set kgf":6.,"Measured peak speed m/s":5.89,"Measured LC sum kgf":8.5}
+    ]),hide_index=True,use_container_width=True,num_rows="fixed")
+    predictions=[]
+    for _,r in observed.iterrows():
+        scenario=from_dict(to_dict(test))
+        scenario.pull_set_kgf=float(r["Pull set kgf"])
+        scenario.brake_set_kgf=float(r["Brake set kgf"])
+        sim=simulate(scenario)
+        on=sim[sim.time_s<scenario.duration_s]
+        core=on[(on.time_s>.3*scenario.duration_s)&(on.time_s<.85*scenario.duration_s)]
+        if core.empty: core=on
+        predictions.append({"Test":r["Test"],
+            "Observed speed m/s":float(r["Measured peak speed m/s"]),
+            "Predicted speed m/s":float(on.speed_m_s.max()),
+            "Speed error m/s":float(on.speed_m_s.max()-r["Measured peak speed m/s"]),
+            "Observed LC kgf":float(r["Measured LC sum kgf"]),
+            "Predicted LC kgf":float(core.lc_sum_pred_kgf.median()),
+            "LC error kgf":float(core.lc_sum_pred_kgf.median()-r["Measured LC sum kgf"])})
+    comparison=pd.DataFrame(predictions)
+    st.dataframe(comparison.style.format(precision=2),hide_index=True,use_container_width=True)
+    cc,dd=st.columns(2)
+    with cc:
+        f=go.Figure()
+        f.add_bar(x=comparison["Test"],y=comparison["Observed speed m/s"],name="Recorded peak")
+        f.add_bar(x=comparison["Test"],y=comparison["Predicted speed m/s"],name="Predicted peak")
+        f.update_layout(barmode="group",template="plotly_white",title="Speed comparison",yaxis_title="m/s")
+        st.plotly_chart(f,use_container_width=True)
+    with dd:
+        f=go.Figure()
+        f.add_bar(x=comparison["Test"],y=comparison["Observed LC kgf"],name="Recorded rope force")
+        f.add_bar(x=comparison["Test"],y=comparison["Predicted LC kgf"],name="Predicted rope force")
+        f.update_layout(barmode="group",template="plotly_white",title="Load-cell comparison",yaxis_title="kgf")
+        st.plotly_chart(f,use_container_width=True)
+    rms_speed=float(np.sqrt(np.mean(comparison["Speed error m/s"]**2)))
+    rms_lc=float(np.sqrt(np.mean(comparison["LC error kgf"]**2)))
+    aa,bb=st.columns(2)
+    aa.metric("Four-condition speed RMSE",f"{rms_speed:.3f} m/s")
+    bb.metric("Four-condition force RMSE",f"{rms_lc:.3f} kgf")
+    st.caption("These points are the displayed October 27 averages, not time-aligned raw signals. Change the values if your logger recalculation differs. A good numerical match alone cannot prove parameter uniqueness.")
+
+with st.expander("Local model sensitivity (±10% per parameter)"):
+    st.caption("Finite-difference change in predicted peak speed and median LC sum for the selected test. Only one model parameter changes at a time.")
+    baseline_speed=float(active.speed_m_s.max())
+    baseline_force=float(middle.lc_sum_pred_kgf.median())
+    changes=[
+        ("Pull drum radius","pull","radius_m"),
+        ("Brake drum radius","brake","radius_m"),
+        ("Pull inertia","pull","motor_inertia_kgm2"),
+        ("Brake inertia","brake","motor_inertia_kgm2"),
+        ("Pull Coulomb friction","pull","coulomb_kgf"),
+        ("Brake Coulomb friction","brake","coulomb_kgf"),
+        ("Pull viscous friction","pull","viscous_ns_m"),
+        ("Brake viscous friction","brake","viscous_ns_m"),
+        ("Pull motor current limit","pull","max_iq_a")
+    ]
+    senses=[]
+    for title,device,key in changes:
+        curr=getattr(getattr(test,device),key)
+        if curr<=0: continue
+        trials=[]
+        for factor in (.9,1.1):
+            trial=from_dict(to_dict(test))
+            setattr(getattr(trial,device),key,curr*factor)
+            out=simulate(trial)
+            on=out[out.time_s<trial.duration_s]
+            part=on[(on.time_s>.3*trial.duration_s)&(on.time_s<.85*trial.duration_s)]
+            trials.append((float(on.speed_m_s.max()),float(part.lc_sum_pred_kgf.median())))
+        senses.append({"Parameter":title,
+            "Peak speed response (m/s per +10%)":(trials[1][0]-trials[0][0])/2,
+            "LC response (kgf per +10%)":(trials[1][1]-trials[0][1])/2})
+    if senses:
+        st.dataframe(pd.DataFrame(senses).style.format(precision=3),hide_index=True,use_container_width=True)
+    st.caption("Local sensitivity is not parameter identification; correlated parameter combinations can reproduce the same curve.")
